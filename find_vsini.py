@@ -13,7 +13,7 @@ This code is used to estimate the projected rotation of solar twin stars
 using Python, MOOG synth, in addition to RogueAstro's pwoogs and 
 astroChasqui's q2 codes.
 
-Required files:
+Required files (soon I will commit some example files):
 * s_twins.csv: contains the information of the stars
 * filenames.lis: contains the list of names of the spectrum .fits files
 * lines.dat: contains information about the lines to be analyzed
@@ -26,6 +26,9 @@ star_names = np.loadtxt('s_twins.csv',
                         usecols=(0,),
                         dtype=str,
                         delimiter=',')
+
+# This is used to manage data arrays
+u = utils.arr_manage()
 
 # The following function is used to set the input files to be used by MOOG
 # for a specific star from the list star_names.
@@ -100,6 +103,47 @@ def set_star(choice, **kwargs):
 def v_m(T):
     return 3.6+(T-5777.)/486
 
+# Managing data file because it is possibly huge
+def manage(choice, interval, lines, chunk):
+
+    print 'Managing the data file.'
+    spec_window = np.array([lines[choice,0]-interval/2,lines[choice,0]+interval/2])
+    u.cut(spec_window[0]-chunk,spec_window[1]+chunk,'spectrum_full.dat','spectrum.dat')
+    print 'Done.\n'
+    
+    return spec_window
+
+# Function that returns the corrections factors for line center and continuum
+def correct(choice, data, lines, cont_type, r_1, r_2, r_3):
+
+    # The following lines are used to find calibration corrections for the spectral line
+    print 'Finding the shift on the wavelength.'
+    wl_shift = 10.
+    ind = u.find_index(lines[choice,0],data[:,0])
+    while abs(wl_shift) > 1.0:
+        center = u.find_center(data[ind-r_1+1:ind+r_1+2])
+        wl_shift = lines[choice,0]-center
+    print 'Wavelength shift = %.4f\n' % wl_shift
+
+    print "Finding the correction factor for the continuum."
+    ind_min = u.find_index(lines[choice,0]-r_2,data[:,0])
+    ind_max = u.find_index(lines[choice,0]+r_2,data[:,0])
+    if cont_type == 'single':    
+        corr = 1.0/np.mean(u.find_corr(
+            data[ind_min:ind_max,:],
+            r_3
+            ))
+    elif cont_type == 'multi':
+        target_wls = np.loadtxt('continuum.dat')
+        corr = 1.0/np.mean(u.find_corr_from_ensemble(
+        data[ind_min:ind_max,:],
+        target_wls[choice,:],
+        r_3
+        ))
+    print "Correction factor = %.4f" % corr
+
+    return wl_shift, corr
+
 def full_auto(choice, interval, res_power, SN, **kwargs):
     
     # Spectrum chunk size. Default = 10. angstroms
@@ -108,7 +152,7 @@ def full_auto(choice, interval, res_power, SN, **kwargs):
         assert chunk > interval, 'Invalid chunk size'
     else:
         chunk = 10.0
-    
+
     # Continuum correction: choose between 'single' or 'multi' wavelengths
     if ('continuum_correction' in kwargs):
         cont_type = kwargs['continuum_correction']
@@ -138,15 +182,15 @@ def full_auto(choice, interval, res_power, SN, **kwargs):
         radius_3 = kwargs['r_3']
         assert radius_3 > 0, 'Invalid radius for continuum correction'
     else:
-        radius_3 = 2
-        
+        radius_3 = 2    
+    
     # Radius in points to be used in evaluating the performance function
     # Default = 7
     if ('r_4' in kwargs):
-        radius_4= kwargs['r_4']
+        radius_4 = kwargs['r_4']
         assert radius_4 > 0, 'Invalid radius for performance evaluation'
     else:
-        radius_4= 7
+        radius_4 = 7
         
     # Blue wing weight to be used on estimation. Default = 10.0
     if ('bw' in kwargs):
@@ -195,43 +239,18 @@ def full_auto(choice, interval, res_power, SN, **kwargs):
     T_star = star_info[0]
     v_macro = v_m(T_star)
 
-    # This is used to manage data arrays
-    u = utils.arr_manage()
+    data = np.loadtxt('spectrum.dat')
     
-    # Managing data file because it is possibly huge
-    print 'Managing the data file.'
-    spec_window = np.array([lines[choice,0]-interval/2,lines[choice,0]+interval/2])
-    u.cut(spec_window[0]-chunk,spec_window[1]+chunk,'spectrum_full.dat','spectrum.dat')
-    print 'Done.\n'
+    # Managing the data file
+    spec_window = manage(choice, interval, lines, chunk)
 
     # The instrumental broadening
     gauss = np.mean(spec_window)/res_power
 
-    # The following lines are used to find calibration corrections for the spectral line
-    print 'Finding the shift on the wavelength.'
-    data = np.loadtxt('spectrum.dat')
-    ind = u.find_index(lines[choice,0],data[:,0])
-    center = u.find_center(data[ind-radius_1+1:ind+radius_1+2])
-    wl_shift = lines[choice,0]-center
-    print 'Wavelength shift = %.4f\n' % wl_shift
-
-    print "Finding the correction factor for the continuum."
-    ind_min = u.find_index(lines[choice,0]-radius_2,data[:,0])
-    ind_max = u.find_index(lines[choice,0]+radius_2,data[:,0])
-    if cont_type == 'single':    
-        corr = 1.0/np.mean(u.find_corr(
-            data[ind_min:ind_max,:],
-            #target_wls[choice,:],
-            radius_3
-            ))
-    elif cont_type == 'multi':
-        target_wls = np.loadtxt('continuum.dat')
-        corr = 1.0/np.mean(u.find_corr_from_ensemble(
-        data[ind_min:ind_max,:],
-        target_wls[choice,:],
-        radius_3
-        ))
-    print "Correction factor = %.4f" % corr
+    # Finding the correction factors
+    wl_shift, corr = correct(choice, data, lines, cont_type, radius_1, radius_2, 
+                             radius_3)
+    
     print "Now starting estimation of vsini..."
 
     # Instatiating the function to write parameters for MOOG
@@ -265,8 +284,7 @@ def full_auto(choice, interval, res_power, SN, **kwargs):
                              save=save)
     return vsini,abund,bfs
 
-
-# The next functions are spcifically used in my research, but they can be used
+# The next functions are specifically used in my research, but they can be used
 # as examples for other setups
 
 def batch(filename):
@@ -307,7 +325,7 @@ def single_star(m):
 def single_line(m,l):
     star = m
     set_star(star, inverted_filelist=True)
-    v, a, bf = full_auto(l
+    v, a, bf = full_auto(l,
                          interval=1.0, 
                          res_power=65000., 
                          SN=400)
